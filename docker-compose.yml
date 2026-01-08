@@ -1,0 +1,25 @@
+services:
+  uav-1:
+    image: alpine:3.20
+    container_name: fm-uav-1
+    command: ["sh", "-lc", "echo '[uav-1] online'; sleep infinity"]
+
+  uav-2:
+    image: alpine:3.20
+    container_name: fm-uav-2
+    command: ["sh", "-lc", "echo '[uav-2] online'; sleep infinity"]
+
+  uav-3:
+    image: alpine:3.20
+    container_name: fm-uav-3
+    command: ["sh", "-lc", "echo '[uav-3] online'; sleep infinity"]
+
+  uav-4:
+    image: alpine:3.20
+    container_name: fm-uav-4
+    command: ["sh", "-lc", "echo '[uav-4] online'; sleep infinity"]
+
+  uav-5:
+    image: alpine:3.20
+    container_name: fm-uav-5
+    command: ["sh", "-lc", "echo '[uav-5] online'; sleep infinity"]
