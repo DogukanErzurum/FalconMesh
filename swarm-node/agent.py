@@ -1,66 +1,169 @@
-import json
+from __future__ import annotations
+
 import os
-import random
+import json
 import time
+import math
+import random
+import threading
 from datetime import datetime, timezone
-from urllib import request, error
 
-NODE_ID = os.getenv("NODE_ID", "uav-unknown")
-ROLE = os.getenv("ROLE", "follower")
-STATE = os.getenv("STATE", "NORMAL")
-HZ = float(os.getenv("HZ", "1"))
+import requests
 
-CONTROL_API_URL = os.getenv("CONTROL_API_URL", "").rstrip("/")
-INGEST_PATH = os.getenv("INGEST_PATH", "/ingest")
-INGEST_TIMEOUT = float(os.getenv("INGEST_TIMEOUT", "1.5"))
+# Optional WS command channel
+try:
+    import websocket  # websocket-client
+except Exception:
+    websocket = None
 
-x = float(os.getenv("START_X", str(random.uniform(-50, 50))))
-y = float(os.getenv("START_Y", str(random.uniform(-50, 50))))
-heading = float(os.getenv("START_HEADING", str(random.uniform(0, 359))))
-speed = float(os.getenv("START_SPEED", str(random.uniform(8, 22))))
-battery = float(os.getenv("START_BATT", str(random.uniform(70, 100))))
+NODE_ID = os.getenv("NODE_ID", "uav-1")
+CONTROL_API_URL = os.getenv("CONTROL_API_URL", "http://control-api:8000")
+
+# shared state
+STATE_LOCK = threading.Lock()
+STATE = "NORMAL"  # NORMAL | HOLD | RTB | FORM_UP
+ROLE = "follower"
+
+# simple 2D kinematics
+x = random.uniform(-60, 60)
+y = random.uniform(-60, 60)
+heading = random.uniform(0, 360)
+speed = random.uniform(6, 22)
+battery = random.uniform(60, 95)
 
 def utc_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-def ingest(payload: dict) -> None:
-    if not CONTROL_API_URL:
-        return
-    url = f"{CONTROL_API_URL}{INGEST_PATH}"
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with request.urlopen(req, timeout=INGEST_TIMEOUT) as resp:
-            _ = resp.read()
-    except Exception:
-        # do not crash node on ingest issues
-        return
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-while True:
-    heading = (heading + random.uniform(-5, 5)) % 360
-    speed = max(0.0, min(35.0, speed + random.uniform(-0.8, 0.8)))
+def tick_motion(dt: float):
+    global x, y, heading, speed, battery
 
-    x += random.uniform(-1.5, 1.5)
-    y += random.uniform(-1.5, 1.5)
+    with STATE_LOCK:
+        st = STATE
 
-    battery = max(0.0, battery - random.uniform(0.01, 0.08))
+    # simple behaviors
+    if st == "HOLD":
+        speed_local = 0.0
+    elif st == "RTB":
+        # go toward origin
+        dx, dy = -x, -y
+        heading_local = (math.degrees(math.atan2(dy, dx)) + 360) % 360
+        heading = heading_local
+        speed_local = 18.0
+    elif st == "FORM_UP":
+        # mild convergence to a ring around origin
+        r = math.hypot(x, y)
+        target_r = 35.0
+        if r > 1e-6:
+            # radial correction
+            dr = (target_r - r) * 0.2
+            x += (x / r) * dr
+            y += (y / r) * dr
+        speed_local = 12.0
+    else:
+        speed_local = speed
 
-    msg = {
+    # move
+    rad = math.radians(heading)
+    x += math.cos(rad) * speed_local * dt
+    y += math.sin(rad) * speed_local * dt
+
+    # wander heading slightly in NORMAL/FORM_UP
+    if st in ("NORMAL", "FORM_UP"):
+        heading = (heading + random.uniform(-8, 8)) % 360
+
+    # battery drain
+    battery = clamp(battery - (0.02 + 0.001 * speed_local), 0, 100)
+
+    # net stats placeholder
+    net = {"rtt_ms": 0, "loss_pct": 0}
+
+    payload = {
         "ts": utc_iso(),
         "node_id": NODE_ID,
         "role": ROLE,
-        "state": STATE,
+        "state": st,
         "pos": {"x": round(x, 2), "y": round(y, 2)},
         "heading_deg": round(heading, 1),
-        "speed_mps": round(speed, 1),
+        "speed_mps": round(speed_local, 1),
         "battery_pct": round(battery, 1),
-        "net": {"rtt_ms": 0, "loss_pct": 0},
+        "net": net,
     }
+    return payload
 
-    # local log (for debugging)
-    print(json.dumps(msg, ensure_ascii=False), flush=True)
+def ingest_loop():
+    url = CONTROL_API_URL.rstrip("/") + "/ingest"
+    last = time.time()
+    while True:
+        now = time.time()
+        dt = now - last
+        last = now
+        payload = tick_motion(dt)
+        try:
+            requests.post(url, json=payload, timeout=2)
+        except Exception:
+            pass
+        time.sleep(1.0)
 
-    # send to control plane
-    ingest(msg)
+def ws_command_loop():
+    """
+    Connect to Control API UAV WS channel and update STATE on commands.
+    Requires websocket-client. If missing, loop exits silently.
+    """
+    if websocket is None:
+        return
 
-    time.sleep(1.0 / HZ)
+    ws_url = CONTROL_API_URL.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
+    ws_url = f"{ws_url}/ws/uav?node_id={NODE_ID}"
+
+    def on_message(ws, message):
+        global STATE
+        try:
+            msg = json.loads(message)
+            if msg.get("type") != "command":
+                return
+            target = msg.get("target")
+            cmd = msg.get("command")
+            if target not in ("all", NODE_ID):
+                return
+            if cmd not in ("HOLD", "RTB", "FORM_UP", "RESUME"):
+                return
+            with STATE_LOCK:
+                STATE = "NORMAL" if cmd == "RESUME" else cmd
+        except Exception:
+            return
+
+    def on_open(ws):
+        # keepalive ping thread
+        def ping():
+            while True:
+                try:
+                    ws.send("ping")
+                except Exception:
+                    break
+                time.sleep(10)
+        threading.Thread(target=ping, daemon=True).start()
+
+    while True:
+        try:
+            ws = websocket.WebSocketApp(ws_url, on_open=on_open, on_message=on_message)
+            ws.run_forever(ping_interval=0)  # we do our own ping
+        except Exception:
+            pass
+        time.sleep(2)
+
+def main():
+    t1 = threading.Thread(target=ingest_loop, daemon=True)
+    t1.start()
+
+    t2 = threading.Thread(target=ws_command_loop, daemon=True)
+    t2.start()
+
+    print(json.dumps({"ts": utc_iso(), "node_id": NODE_ID, "msg": "agent started", "control_api": CONTROL_API_URL}))
+    while True:
+        time.sleep(60)
+
+if __name__ == "__main__":
+    main()
