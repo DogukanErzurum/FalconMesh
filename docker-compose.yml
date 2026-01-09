@@ -5,6 +5,14 @@ services:
     ports:
       - "8000:8000"
 
+  gcs-ui:
+    build: ./gcs-ui
+    container_name: fm-gcs-ui
+    ports:
+      - "8080:80"
+    depends_on:
+      - control-api
+
   uav-1:
     build: ./swarm-node
     container_name: fm-uav-1
