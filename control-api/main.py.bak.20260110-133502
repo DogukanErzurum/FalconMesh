@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from typing import Dict, Any, Set, Optional
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
+from fastapi.responses import JSONResponse
+
+app = FastAPI(title="FalconMesh Control API")
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+# --- stores ---
+LAST: Dict[str, Dict[str, Any]] = {}  # node_id -> last telemetry payload
+
+WS_TELEM: Set[WebSocket] = set()
+WS_UAV: Set[WebSocket] = set()
+UAV_WS_NODE: Dict[WebSocket, str] = {}
+
+MISSION = {
+    "id": None,
+    "created_ts": None,
+    "waypoints": [],  # list of {x,y,alt_m,speed_mps}
+}
+
+# --- helpers ---
+async def ws_broadcast(clients: Set[WebSocket], msg: dict):
+    """Best-effort broadcast. Removes dead sockets."""
+    dead = []
+    payload = json.dumps(msg)
+    for ws in list(clients):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        try:
+            clients.remove(ws)
+        except Exception:
+            pass
+
+# --- HTTP endpoints ---
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "ts": utc_iso(),
+        "nodes": len(LAST),
+        "ws_telem": len(WS_TELEM),
+        "ws_uav": len(WS_UAV),
+    }
+
+@app.get("/api/nodes")
+def nodes():
+    return {"ts": utc_iso(), "nodes": list(LAST.values())}
+
+@app.get("/api/mission")
+def get_mission():
+    return {"ts": utc_iso(), "mission": MISSION}
+
+@app.post("/api/mission")
+async def set_mission(body: dict = Body(...)):
+    # Expect: {id?: str, waypoints: [{x,y,alt_m,speed_mps}]}
+    waypoints = body.get("waypoints", [])
+    if not isinstance(waypoints, list):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "waypoints must be a list"})
+
+    mid = body.get("id")
+    if not mid:
+        mid = f"mission-{utc_iso()}"
+
+    MISSION["id"] = mid
+    MISSION["created_ts"] = utc_iso()
+    MISSION["waypoints"] = waypoints
+
+    await ws_broadcast(WS_TELEM, {
+        "type": "mission_update",
+        "ts": utc_iso(),
+        "mission": MISSION
+    })
+
+    return {"ok": True, "ts": utc_iso(), "mission": MISSION}
+
+@app.delete("/api/mission")
+async def clear_mission():
+    MISSION["id"] = None
+    MISSION["created_ts"] = None
+    MISSION["waypoints"] = []
+
+    await ws_broadcast(WS_TELEM, {
+        "type": "mission_update",
+        "ts": utc_iso(),
+        "mission": MISSION
+    })
+
+    return {"ok": True, "ts": utc_iso(), "mission": MISSION}
+
+@app.post("/ingest")
+async def ingest(payload: Dict[str, Any]):
+    node_id = payload.get("node_id")
+    if not node_id:
+        return JSONResponse({"ok": False, "err": "missing node_id"}, status_code=400)
+
+    LAST[node_id] = payload
+
+    # broadcast telemetry to GCS subscribers (json)
+    dead = []
+    for ws in list(WS_TELEM):
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        WS_TELEM.discard(ws)
+
+    return {"ok": True, "ts": utc_iso()}
+
+@app.post("/api/command")
+async def command(cmd: Dict[str, Any]):
+    """
+    Command schema:
+      {
+        "target": "uav-1" | "all",
+        "command": "HOLD" | "RTB" | "FORM_UP" | "RESUME",
+        "params": {... optional ...}
+      }
+    """
+    target = cmd.get("target")
+    command = cmd.get("command")
+    params = cmd.get("params", {})
+
+    if target not in ("all",) and not (isinstance(target, str) and target.startswith("uav-")):
+        return JSONResponse({"ok": False, "err": "invalid target"}, status_code=400)
+    if command not in ("HOLD", "RTB", "FORM_UP", "RESUME"):
+        return JSONResponse({"ok": False, "err": "invalid command"}, status_code=400)
+
+    msg = {"type": "command", "ts": utc_iso(), "target": target, "command": command, "params": params}
+
+    # deliver to UAV sockets
+    dead = []
+    delivered = 0
+    for ws in list(WS_UAV):
+        try:
+            node = UAV_WS_NODE.get(ws)
+            if target == "all" or node == target:
+                await ws.send_json(msg)
+                delivered += 1
+        except Exception:
+            dead.append(ws)
+
+    for ws in dead:
+        WS_UAV.discard(ws)
+        UAV_WS_NODE.pop(ws, None)
+
+    return {"ok": True, "ts": utc_iso(), "delivered": delivered}
+
+# --- WebSocket endpoints ---
+@app.websocket("/ws/telemetry")
+async def ws_telemetry(ws: WebSocket):
+    await ws.accept()
+    WS_TELEM.add(ws)
+
+    # snapshot on connect
+    try:
+        await ws.send_json({"type": "snapshot", "ts": utc_iso(), "nodes": list(LAST.values())})
+        await ws.send_json({"type": "mission_update", "ts": utc_iso(), "mission": MISSION})
+    except Exception:
+        WS_TELEM.discard(ws)
+        return
+
+    try:
+        while True:
+            _ = await ws.receive_text()
+    except WebSocketDisconnect:
+        WS_TELEM.discard(ws)
+    except Exception:
+        WS_TELEM.discard(ws)
+
+@app.websocket("/ws/uav")
+async def ws_uav(ws: WebSocket, node_id: Optional[str] = None):
+    """
+    UAV connects here with query: /ws/uav?node_id=uav-1
+    """
+    await ws.accept()
+    if not node_id:
+        await ws.send_json({"ok": False, "err": "missing node_id"})
+        await ws.close()
+        return
+
+    WS_UAV.add(ws)
+    UAV_WS_NODE[ws] = node_id
+
+    try:
+        while True:
+            _ = await ws.receive_text()
+    except WebSocketDisconnect:
+        WS_UAV.discard(ws)
+        UAV_WS_NODE.pop(ws, None)
+    except Exception:
+        WS_UAV.discard(ws)
+        UAV_WS_NODE.pop(ws, None)

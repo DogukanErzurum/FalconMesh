@@ -1,0 +1,189 @@
+(function () {
+  // ---- UI helpers ----
+  const outEl = () => document.getElementById("fm-mission-json");
+  const inputEl = () => document.getElementById("fm-mission-input");
+  const statusEl = () => document.getElementById("fm-mission-status");
+
+  function setStatus(txt) {
+    const el = statusEl();
+    if (!el) return;
+    el.textContent = txt;
+  }
+
+  function renderMission(obj) {
+    const el = outEl();
+    if (!el) return;
+    try {
+      el.textContent = JSON.stringify(obj, null, 2);
+    } catch (e) {
+      el.textContent = String(obj);
+    }
+  }
+
+  async function apiGetMission() {
+    const r = await fetch("/api/mission", { cache: "no-store" });
+    if (!r.ok) throw new Error("GET /api/mission failed: " + r.status);
+    return await r.json();
+  }
+
+  async function apiSetMission(missionBody) {
+    const r = await fetch("/api/mission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(missionBody),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      throw new Error("POST /api/mission failed: " + r.status + " " + t);
+    }
+    return await r.json();
+  }
+
+  async function apiClearMission() {
+    const r = await fetch("/api/mission", { method: "DELETE" });
+    if (!r.ok) throw new Error("DELETE /api/mission failed: " + r.status);
+    return await r.json();
+  }
+
+  // ---- websocket (listen mission_update from /ws/telemetry) ----
+  let ws = null;
+  let wsTimer = null;
+
+  function wsUrl(path) {
+    const proto = (location.protocol === "https:") ? "wss:" : "ws:";
+    return proto + "//" + location.host + path;
+  }
+
+  function connectWs() {
+    try {
+      ws = new WebSocket(wsUrl("/ws/telemetry"));
+
+      ws.onopen = () => {
+        setStatus("WS: connected");
+        // keepalive ping (server ignores text)
+        if (wsTimer) clearInterval(wsTimer);
+        wsTimer = setInterval(() => {
+          try { ws.send("ping"); } catch (e) {}
+        }, 20000);
+      };
+
+      ws.onmessage = (ev) => {
+        // server sends JSON text
+        let msg = null;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+
+        if (msg && msg.type === "mission_update") {
+          renderMission(msg.mission);
+          // also mirror into textarea
+          const inp = inputEl();
+          if (inp) inp.value = JSON.stringify(msg.mission, null, 2);
+        }
+      };
+
+      ws.onclose = () => {
+        setStatus("WS: disconnected (retrying)");
+        if (wsTimer) clearInterval(wsTimer);
+        wsTimer = null;
+        setTimeout(connectWs, 1500);
+      };
+
+      ws.onerror = () => {
+        // let onclose handle retry
+      };
+    } catch (e) {
+      setStatus("WS: connect error (retrying)");
+      setTimeout(connectWs, 1500);
+    }
+  }
+
+  // ---- wire buttons ----
+  function wireUi() {
+    const btnGet = document.getElementById("fm-btn-get");
+    const btnSet = document.getElementById("fm-btn-set");
+    const btnClear = document.getElementById("fm-btn-clear");
+    const btnDemo = document.getElementById("fm-btn-demo");
+
+    if (btnGet) {
+      btnGet.onclick = async () => {
+        try {
+          setStatus("GET...");
+          const res = await apiGetMission();
+          renderMission(res.mission);
+          const inp = inputEl();
+          if (inp) inp.value = JSON.stringify(res.mission, null, 2);
+          setStatus("GET ok");
+        } catch (e) {
+          setStatus(String(e.message || e));
+        }
+      };
+    }
+
+    if (btnSet) {
+      btnSet.onclick = async () => {
+        try {
+          setStatus("SET...");
+          const inp = inputEl();
+          if (!inp) throw new Error("mission input not found");
+
+          const obj = JSON.parse(inp.value || "{}");
+          // Accept either full payload or {id, waypoints}
+          const payload = (obj && obj.waypoints) ? obj : { id: obj.id, waypoints: obj.waypoints || [] };
+
+          const res = await apiSetMission(payload);
+          renderMission(res.mission);
+          setStatus("SET ok");
+        } catch (e) {
+          setStatus(String(e.message || e));
+        }
+      };
+    }
+
+    if (btnClear) {
+      btnClear.onclick = async () => {
+        try {
+          setStatus("CLEAR...");
+          const res = await apiClearMission();
+          renderMission(res.mission);
+          const inp = inputEl();
+          if (inp) inp.value = JSON.stringify(res.mission, null, 2);
+          setStatus("CLEAR ok");
+        } catch (e) {
+          setStatus(String(e.message || e));
+        }
+      };
+    }
+
+    if (btnDemo) {
+      btnDemo.onclick = () => {
+        const demo = {
+          id: "demo-1",
+          waypoints: [
+            { x: 10, y: 20, alt_m: 120, speed_mps: 15 },
+            { x: 40, y: -10, alt_m: 140, speed_mps: 18 }
+          ]
+        };
+        const inp = inputEl();
+        if (inp) inp.value = JSON.stringify(demo, null, 2);
+        setStatus("demo filled (press SET)");
+      };
+    }
+  }
+
+  // ---- init ----
+  window.addEventListener("load", async () => {
+    wireUi();
+    connectWs();
+
+    // initial GET (so panel isn't "(waiting...)")
+    try {
+      setStatus("init GET...");
+      const res = await apiGetMission();
+      renderMission(res.mission);
+      const inp = inputEl();
+      if (inp) inp.value = JSON.stringify(res.mission, null, 2);
+      setStatus("ready");
+    } catch (e) {
+      setStatus("ready (no initial mission)");
+    }
+  });
+})();

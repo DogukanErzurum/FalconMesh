@@ -2,81 +2,50 @@ services:
   control-api:
     build: ./control-api
     container_name: fm-control-api
-    restart: unless-stopped
     ports:
       - "8000:8000"
-    volumes:
-      - fm_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()\""]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-
   gcs-ui:
     build: ./gcs-ui
     container_name: fm-gcs-ui
-    restart: unless-stopped
     ports:
       - "8080:80"
     depends_on:
-      control-api:
-        condition: service_healthy
+      - control-api
 
   uav-1:
     build: ./swarm-node
     container_name: fm-uav-1
-    restart: unless-stopped
     environment:
       NODE_ID: "uav-1"
       CONTROL_API_URL: "http://control-api:8000"
-    depends_on:
-      control-api:
-        condition: service_healthy
 
   uav-2:
     build: ./swarm-node
     container_name: fm-uav-2
-    restart: unless-stopped
     environment:
       NODE_ID: "uav-2"
       CONTROL_API_URL: "http://control-api:8000"
-    depends_on:
-      control-api:
-        condition: service_healthy
 
   uav-3:
     build: ./swarm-node
     container_name: fm-uav-3
-    restart: unless-stopped
     environment:
       NODE_ID: "uav-3"
       CONTROL_API_URL: "http://control-api:8000"
-    depends_on:
-      control-api:
-        condition: service_healthy
 
   uav-4:
     build: ./swarm-node
     container_name: fm-uav-4
-    restart: unless-stopped
     environment:
       NODE_ID: "uav-4"
       CONTROL_API_URL: "http://control-api:8000"
-    depends_on:
-      control-api:
-        condition: service_healthy
 
   uav-5:
     build: ./swarm-node
     container_name: fm-uav-5
-    restart: unless-stopped
     environment:
       NODE_ID: "uav-5"
       CONTROL_API_URL: "http://control-api:8000"
-    depends_on:
-      control-api:
-        condition: service_healthy
-
 volumes:
-  fm_data: {}
+  fm_data:
+      - fm_data:/data

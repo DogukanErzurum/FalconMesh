@@ -1,6 +1,23 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
 .env
+
+# Node / Vite
+**/node_modules/
+**/dist/
+**/.vite/
+
+# OS
 .DS_Store
-node_modules/
-dist/
+Thumbs.db
+
+# Logs
+**/*.log
+
+# Local only
+**/.idea/
+**/.vscode/

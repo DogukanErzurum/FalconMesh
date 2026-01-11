@@ -4,10 +4,147 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>gcs-ui</title>
+    <title>FalconMesh GCS</title>
+
+    <!-- Leaflet (Map) -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+
+    <style>
+      html, body { margin:0; height:100%; background:#0b0f14; overflow:hidden; }
+      #fm-map { position:fixed; inset:0; z-index:1; }
+      #root { position:fixed; inset:0; z-index:2; pointer-events:auto; }
+
+      #fm-hud{
+        position:fixed; left:16px; top:16px;
+        width:360px; max-height:80vh; overflow:auto;
+        z-index:9999;
+        background:rgba(10,12,16,0.88);
+        color:#e6e6e6;
+        border:1px solid rgba(255,255,255,0.12);
+        border-radius:14px;
+        box-shadow:0 10px 30px rgba(0,0,0,0.45);
+        padding:12px;
+        font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial;
+        backdrop-filter:blur(6px);
+      }
+      #fm-hud h3{ margin:0 0 8px 0; font-size:14px; letter-spacing:0.4px; text-transform:uppercase; opacity:0.95; }
+      .fm-row{
+        display:flex; align-items:center; justify-content:space-between; gap:10px;
+        padding:6px 0;
+        border-bottom:1px solid rgba(255,255,255,0.06);
+        font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+        font-size:12px;
+      }
+      .fm-row:last-child{ border-bottom:0; }
+      .fm-badge{
+        font-size:11px; padding:2px 8px; border-radius:999px;
+        border:1px solid rgba(255,255,255,0.14);
+        background:rgba(255,255,255,0.06);
+      }
+      .fm-small{
+        font-size:12px; opacity:0.8;
+        font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      }
+      .fm-list button{
+        width:100%; text-align:left;
+        background:rgba(255,255,255,0.04);
+        color:#e6e6e6;
+        border:1px solid rgba(255,255,255,0.10);
+        border-radius:10px;
+        padding:8px 10px;
+        margin:6px 0;
+        cursor:pointer;
+        font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+        font-size:12px;
+      }
+      .fm-list button:hover{ background:rgba(255,255,255,0.08); }
+      .fm-list button.active{ border-color:rgba(255,255,255,0.28); background:rgba(255,255,255,0.10); }
+
+      .fm-drone{
+        width:18px; height:18px; border-radius:50%;
+        border:1px solid rgba(255,255,255,0.7);
+        background:rgba(0,0,0,0.35);
+        position:relative;
+        box-shadow:0 6px 16px rgba(0,0,0,0.45);
+      }
+      .fm-drone:after{
+        content:"";
+        position:absolute; left:50%; top:-6px;
+        transform:translateX(-50%);
+        width:0; height:0;
+        border-left:5px solid transparent;
+        border-right:5px solid transparent;
+        border-bottom:8px solid rgba(255,255,255,0.9);
+      }
+      .fm-drone.selected{
+        box-shadow:0 0 0 2px rgba(255,255,255,0.35), 0 10px 24px rgba(0,0,0,0.6);
+      }
+
+      #fm-mission-box{
+        position:fixed; right:16px; bottom:16px;
+        width:420px; max-height:55vh; overflow:auto;
+        background:rgba(10,12,16,0.92);
+        color:#e6e6e6;
+        border:1px solid rgba(255,255,255,0.12);
+        border-radius:12px;
+        padding:12px 12px 10px 12px;
+        z-index:9999;
+        box-shadow:0 8px 24px rgba(0,0,0,0.35);
+      }
+      #fm-mission-json{
+        white-space:pre-wrap; margin:0;
+        font-size:12px; line-height:1.35;
+        font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      }
+    </style>
   </head>
+
   <body>
+    <div id="fm-map"></div>
+
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+
+    <div id="fm-hud">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <h3 style="margin:0;">FalconMesh GCS</h3>
+        <div id="fm-hud-status" class="fm-badge">INIT</div>
+      </div>
+      <div class="fm-small" style="margin-top:6px;margin-bottom:10px;">
+        Satellite Tactical View • Live Telemetry
+      </div>
+
+      <div style="margin-top:8px;">
+        <div class="fm-small" style="opacity:0.9;">UAV LIST</div>
+        <div id="fm-uav-list" class="fm-list"></div>
+      </div>
+
+      <div style="margin-top:10px;">
+        <div class="fm-small" style="opacity:0.9;">SELECTED UAV</div>
+        <div id="fm-uav-details" style="margin-top:6px;"></div>
+      </div>
+    </div>
+
+    <div id="fm-mission-box">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+        <div style="font-family:system-ui; font-weight:700;">Mission</div>
+        <div id="fm-mission-status" style="font-family:system-ui; font-size:12px; opacity:0.8;">(waiting)</div>
+      </div>
+      <pre id="fm-mission-json">(waiting...)</pre>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+
+    <script src="/fm-map.js"></script>
+    <script src="/fm-mission.js"></script>
   </body>
 </html>
