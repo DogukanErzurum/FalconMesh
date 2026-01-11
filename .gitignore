@@ -21,3 +21,6 @@ Thumbs.db
 # Local only
 **/.idea/
 **/.vscode/
+
+# Local backups
+*.bak.*
