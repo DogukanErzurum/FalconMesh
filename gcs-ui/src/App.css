@@ -11,13 +11,32 @@
 }
 
 *{ box-sizing:border-box; }
-body{ margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+html, body { height: 100%; }
 
-.page{ min-height:100vh; display:flex; flex-direction:column; }
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+}
+
+.mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.page{
+  min-height:100vh;
+  display:flex;
+  flex-direction:column;
+}
+
+/* --- topbar --- */
 .topbar{
-  display:flex; justify-content:space-between; align-items:center;
-  padding:16px 18px; border-bottom:1px solid var(--line);
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:16px 18px;
+  border-bottom:1px solid var(--line);
   background:linear-gradient(180deg, rgba(17,24,38,1), rgba(11,15,20,1));
 }
 .title{ font-size:20px; font-weight:900; letter-spacing:0.2px; }
@@ -25,28 +44,30 @@ body{ margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-se
 .right{ text-align:right; display:flex; flex-direction:column; gap:6px; }
 .meta{ color:var(--muted); font-size:12px; }
 
+/* --- badges --- */
 .badge{
-  display:inline-flex; align-self:flex-end;
-  padding:6px 10px; border-radius:999px; font-weight:900; font-size:12px;
+  display:inline-flex;
+  align-self:flex-end;
+  padding:6px 10px;
+  border-radius:999px;
+  font-weight:900;
+  font-size:12px;
   border:1px solid var(--line);
 }
 .badge.ok{ color:var(--ok); background:rgba(34,197,94,0.08); border-color:rgba(34,197,94,0.35); }
 .badge.bad{ color:var(--bad); background:rgba(239,68,68,0.08); border-color:rgba(239,68,68,0.35); }
 
-.content{ padding:18px; display:flex; justify-content:center; }
+/* --- main content --- */
+/* IMPORTANT: content MUST be able to grow, and grid children must measure height correctly */
+.content{
+  padding: 10px !important;
+  display:flex;
+  justify-content:center;
 
-.grid2{
-  width:min(1400px, 100%);
-  display:grid;
-  grid-template-columns: 340px 1fr 1.25fr;
-  gap:14px;
-  align-items:start;
-}
-@media (max-width: 1200px){
-  .grid2{ grid-template-columns: 340px 1fr; }
-}
-@media (max-width: 980px){
-  .grid2{ grid-template-columns: 1fr; }
+  /* critical layout fixes */
+  width: 100%;
+  flex: 1;
+  min-height: 0; /* allows children (map) to be sized properly in flex */
 }
 
 .card{
@@ -95,40 +116,6 @@ body{ margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-se
   padding-top:10px;
 }
 
-.mapCard .mapHint{
-  color: var(--muted);
-  font-size: 12px;
-  margin-bottom: 10px;
-  line-height: 1.35;
-}
-.mapWrap{
-  border:1px solid var(--line);
-  border-radius:12px;
-  overflow:hidden;
-  background: var(--panel2);
-}
-.mapCanvas{
-  display:block;
-  width:100%;
-  height:420px;
-  cursor: crosshair;
-}
-.mapFooter{
-  margin-top:10px;
-  color: var(--muted);
-  font-size: 12px;
-  border-top:1px solid var(--line);
-  padding-top:10px;
-}
-
-.tableWrap{ overflow:auto; border-radius:12px; border:1px solid var(--line); }
-.table{ width:100%; border-collapse:collapse; min-width:900px; background:var(--panel2); }
-.table th, .table td{ padding:10px 10px; border-bottom:1px solid var(--line); font-size:13px; }
-.table th{ text-align:left; color:var(--muted); font-weight:900; }
-.table tr:hover td{ background: rgba(255,255,255,0.03); }
-.stateCell{ font-weight:900; }
-.rowSel td{ background: rgba(255,255,255,0.05) !important; }
-
 .error{
   margin:12px 18px 0;
   padding:10px 12px;
@@ -145,85 +132,29 @@ body{ margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-se
   font-size:12px;
 }
 
-/* --- v2 layout: big map on top, panels below --- */
-.gridMain{
-  width:min(1400px, 100%);
-  display:flex;
-  flex-direction:column;
-  gap:14px;
-}
-
-.bottomRow{
-  display:grid;
-  grid-template-columns: 360px 1fr;
-  gap:14px;
-  align-items:start;
-}
-
-@media (max-width: 980px){
-  .bottomRow{ grid-template-columns: 1fr; }
-}
-
-.mapWide .mapWrap{
-  border-radius: 14px;
-}
-
-.mapCanvasWide{
-  height: 520px;
-}
-
-@media (max-width: 980px){
-  .mapCanvasWide{ height: 420px; }
-}
-
-/* --- v2 layout: big map on top, panels below --- */
-.gridMain{
-  width:min(1400px, 100%);
-  display:flex;
-  flex-direction:column;
-  gap:14px;
-}
-
-.bottomRow{
-  display:grid;
-  grid-template-columns: 360px 1fr;
-  gap:14px;
-  align-items:start;
-}
-
-@media (max-width: 980px){
-  .bottomRow{ grid-template-columns: 1fr; }
-}
-
-.mapCanvasWide{
-  height: 520px;
-}
-
-@media (max-width: 980px){
-  .mapCanvasWide{ height: 420px; }
-}
-
-/* --- GCS Shell layout (fills entire width) --- */
-.content{
-  padding: 10px !important;
-}
-
+/* --- GCS Shell layout --- */
 .shell{
   width: 100%;
   display: grid;
   grid-template-columns: 320px 1fr 520px; /* left / map / right */
   gap: 12px;
   align-items: start;
+
+  /* critical to avoid overflow / size bugs */
+  min-height: 0;
 }
 
-.sidebar, .rightPanel, .center{
-  min-width: 0;
+.sidebar, .rightPanel, .center{ min-width: 0; min-height: 0; }
+
+/* IMPORTANT: center must be flex so mapCard can take full height */
+.center{
+  display:flex;
+  flex-direction:column;
+  min-height: 0;
 }
 
-.mapCanvasFull{
-  height: calc(100vh - 190px);
-  min-height: 560px;
-  max-height: 820px;
+@media (max-width: 1100px){
+  .shell{ grid-template-columns: 1fr; }
 }
 
 /* Sidebar navigation */
@@ -246,9 +177,18 @@ body{ margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-se
   background: rgba(96,165,250,0.12);
 }
 
+/* Table */
+.tableWrap{ overflow:auto; border-radius:12px; border:1px solid var(--line); }
+.table{ width:100%; border-collapse:collapse; min-width:900px; background:var(--panel2); }
+.table th, .table td{ padding:10px 10px; border-bottom:1px solid var(--line); font-size:13px; }
+.table th{ text-align:left; color:var(--muted); font-weight:900; }
+.table tr:hover td{ background: rgba(255,255,255,0.03); }
+.stateCell{ font-weight:900; }
+.rowSel td{ background: rgba(255,255,255,0.05) !important; }
+
 /* Log */
 .logBox{
-  max-height: 220px;
+  max-height: 260px;
   overflow:auto;
   padding: 10px;
   border-radius: 12px;
@@ -260,18 +200,65 @@ body{ margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-se
   border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 
-/* Responsive */
-@media (max-width: 1280px){
-  .shell{
-    grid-template-columns: 300px 1fr 420px;
-  }
+/* Mission small KV rows */
+.kv{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  padding:6px 0;
 }
-@media (max-width: 1040px){
-  .shell{
-    grid-template-columns: 1fr;
-  }
-  .mapCanvasFull{
-    height: 520px;
-    min-height: 420px;
-  }
+.kv .k{ color: var(--muted); font-size: 12px; font-weight: 900; }
+.kv .v{ font-size: 12px; }
+.sep{ height: 1px; background: rgba(255,255,255,0.08); margin: 10px 0; }
+
+/* Map */
+.mapHint{
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+  line-height: 1.35;
+}
+
+/* --- Leaflet sizing: this is the MOST IMPORTANT part --- */
+.mapCard{
+  display:flex;
+  flex-direction:column;
+  height: calc(100vh - 190px);
+  min-height: 560px;
+  max-height: 820px;
+  min-height: 0;
+}
+
+.mapWrap{
+  flex: 1;
+  min-height: 0;
+}
+
+.leafletWrap .leaflet-container{
+  height: 100% !important;
+  width: 100% !important;
+}
+.leafletWrap .leaflet-container .leaflet-map-pane,
+.leafletWrap .leaflet-container .leaflet-tile-pane,
+.leafletWrap .leaflet-container .leaflet-overlay-pane,
+.leafletWrap .leaflet-container .leaflet-marker-pane,
+.leafletWrap .leaflet-container .leaflet-shadow-pane,
+.leafletWrap .leaflet-container .leaflet-pane{
+  height: 100% !important;
+  width: 100% !important;
+}
+
+/* Marker state colors (text only, popup title) */
+.stateNormal{ color: #60a5fa; font-weight:900; }
+.stateForm{ color: #22c55e; font-weight:900; }
+.stateHold{ color: #facc15; font-weight:900; }
+.stateRTB{ color: #ef4444; font-weight:900; }
+.stateUnknown{ color: #e5e7eb; font-weight:900; }
+
+.mapFooter{
+  margin-top:10px;
+  color: var(--muted);
+  font-size: 12px;
+  border-top:1px solid var(--line);
+  padding-top:10px;
 }

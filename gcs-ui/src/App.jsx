@@ -1,13 +1,70 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  Circle,
+  useMapEvents,
+  useMap,
+} from "react-leaflet";
 
+// --- helpers ---
 function fmtTs(ts) {
   if (!ts) return "-";
   return ts.replace("T", " ").replace("Z", " UTC");
 }
-
 function badgeClass(ok) {
   return ok ? "badge ok" : "badge bad";
+}
+function isNum(v) {
+  return typeof v === "number" && !Number.isNaN(v);
+}
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+
+// --- Map click helper ---
+function ClickCapture({ onClick }) {
+  useMapEvents({
+    click(e) {
+      onClick?.(e.latlng);
+    },
+  });
+  return null;
+}
+
+// --- Fix Leaflet sizing in grid/flex layouts ---
+function MapAutoSize() {
+  const map = useMap();
+
+  useEffect(() => {
+    const apply = () => {
+      try {
+        map.invalidateSize();
+      } catch {}
+    };
+
+    const t1 = setTimeout(apply, 0);
+    const t2 = setTimeout(apply, 200);
+    const t3 = setTimeout(apply, 800);
+
+    const ro = new ResizeObserver(() => apply());
+    ro.observe(map.getContainer());
+
+    window.addEventListener("resize", apply);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      ro.disconnect();
+      window.removeEventListener("resize", apply);
+    };
+  }, [map]);
+
+  return null;
 }
 
 export default function App() {
@@ -18,14 +75,13 @@ export default function App() {
 
   const [target, setTarget] = useState("all");
   const [sending, setSending] = useState(false);
-  const [lastCmd, setLastCmd] = useState(null);
+
+  const [selectedNode, setSelectedNode] = useState(null);
+
+  const [mission, setMission] = useState(null);
+  const [events, setEvents] = useState([]);
 
   const byIdRef = useRef(new Map()); // node_id -> last state
-
-  // MAP
-  const canvasRef = useRef(null);
-  const mapHitRef = useRef([]); // {node_id, cx, cy, r}
-  const [selectedNode, setSelectedNode] = useState(null);
 
   async function refreshHealth() {
     try {
@@ -34,6 +90,18 @@ export default function App() {
     } catch {
       // ignore
     }
+  }
+
+  function pushEvent(line) {
+    setEvents((prev) => {
+      const now = new Date()
+        .toISOString()
+        .replace(".000", "")
+        .replace("T", " ")
+        .replace("Z", " UTC");
+      const next = [{ ts: now, line }, ...prev];
+      return next.slice(0, 50);
+    });
   }
 
   function upsertNode(n) {
@@ -59,13 +127,25 @@ export default function App() {
       });
       const j = await res.json();
       if (!res.ok || !j.ok) throw new Error(j.err || "command failed");
-      setLastCmd({ ts: j.ts, target, command, delivered: j.delivered });
+      pushEvent(`CMD ${command} → ${target} (delivered: ${j.delivered})`);
       refreshHealth();
     } catch (e) {
       setErr("Command error: " + String(e));
     } finally {
       setSending(false);
     }
+  }
+
+  async function postMissionPatch(patch) {
+    const res = await fetch("/api/mission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const j = await res.json();
+    if (!res.ok || !j.ok)
+      throw new Error(j.error || j.err || "mission update failed");
+    return j.mission;
   }
 
   // WS telemetry
@@ -80,17 +160,31 @@ export default function App() {
     ws.onopen = () => {
       setWsStatus("CONNECTED");
       refreshHealth();
+      pushEvent("WS CONNECTED");
     };
-    ws.onclose = () => setWsStatus("DISCONNECTED");
-    ws.onerror = () => setWsStatus("ERROR");
+    ws.onclose = () => {
+      setWsStatus("DISCONNECTED");
+      pushEvent("WS DISCONNECTED");
+    };
+    ws.onerror = () => {
+      setWsStatus("ERROR");
+      pushEvent("WS ERROR");
+    };
 
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
+
         if (msg && msg.type === "snapshot") {
           setSnapshot(msg.nodes || []);
           return;
         }
+
+        if (msg && msg.type === "mission_update") {
+          setMission(msg.mission || null);
+          return;
+        }
+
         upsertNode(msg);
       } catch (e) {
         setErr("WS parse error: " + String(e));
@@ -101,155 +195,83 @@ export default function App() {
 
     return () => {
       clearInterval(t);
-      try { ws.close(); } catch {}
+      try {
+        ws.close();
+      } catch {}
     };
   }, []);
 
   const sorted = useMemo(() => {
-    return [...nodes].sort((a, b) => (a.node_id || "").localeCompare(b.node_id || ""));
+    return [...nodes].sort((a, b) =>
+      (a.node_id || "").localeCompare(b.node_id || "")
+    );
   }, [nodes]);
 
-  const targets = useMemo(() => ["all", ...sorted.map((n) => n.node_id)], [sorted]);
+  const targets = useMemo(
+    () => ["all", ...sorted.map((n) => n.node_id)],
+    [sorted]
+  );
 
-  // MAP draw
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  // --- Mission view helpers (prefer v2) ---
+  const baseLL = mission?.base_ll || null;
+  const targetLL = mission?.target_ll || null;
+  const stagingLL = Array.isArray(mission?.staging) ? mission.staging : [];
+  const batteryV2 = mission?.battery || null;
 
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    const w = Math.max(1, Math.floor(rect.width));
-    const h = Math.max(1, Math.floor(rect.height));
-
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    // background
-    ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = "#0f172a";
-    ctx.fillRect(0, 0, w, h);
-
-    // bounds from nodes
-    const xs = sorted.map((n) => n.pos?.x).filter((v) => typeof v === "number");
-    const ys = sorted.map((n) => n.pos?.y).filter((v) => typeof v === "number");
-
-    let minX = -80, maxX = 80, minY = -80, maxY = 80;
-    if (xs.length && ys.length) {
-      minX = Math.min(...xs);
-      maxX = Math.max(...xs);
-      minY = Math.min(...ys);
-      maxY = Math.max(...ys);
-      const padX = Math.max(10, (maxX - minX) * 0.15);
-      const padY = Math.max(10, (maxY - minY) * 0.15);
-      minX -= padX; maxX += padX;
-      minY -= padY; maxY += padY;
-    }
-
-    const worldW = Math.max(1e-6, maxX - minX);
-    const worldH = Math.max(1e-6, maxY - minY);
-
-    const scale = Math.min((w - 24) / worldW, (h - 24) / worldH);
-    const ox = 12 - minX * scale;
-
-    function toScreen(wx, wy) {
-      const sx = ox + wx * scale;
-      const sy = 12 + (maxY - wy) * scale; // flip y
-      return [sx, sy];
-    }
-
-    // grid
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    const grid = 50;
-    for (let gx = 0; gx <= w; gx += grid) {
-      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke();
-    }
-    for (let gy = 0; gy <= h; gy += grid) {
-      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke();
-    }
-
-    // origin marker
-    const [zx, zy] = toScreen(0, 0);
-    ctx.fillStyle = "rgba(96,165,250,0.9)";
-    ctx.beginPath(); ctx.arc(zx, zy, 3, 0, Math.PI * 2); ctx.fill();
-
-    mapHitRef.current = [];
+  // Default map center: base_ll -> first node lat/lon -> Ankara fallback
+  const mapCenter = useMemo(() => {
+    if (baseLL && isNum(baseLL.lat) && isNum(baseLL.lon))
+      return [baseLL.lat, baseLL.lon];
 
     for (const n of sorted) {
-      const px = n.pos?.x;
-      const py = n.pos?.y;
-      if (typeof px !== "number" || typeof py !== "number") continue;
-
-      const [cx, cy] = toScreen(px, py);
-
-      const heading = typeof n.heading_deg === "number" ? n.heading_deg : 0;
-      const rad = (heading * Math.PI) / 180;
-
-      const state = n.state || "UNKNOWN";
-      const isSelected = selectedNode === n.node_id;
-
-      let fill = "rgba(229,231,235,0.90)";
-      let ring = "rgba(255,255,255,0.25)";
-      if (state === "HOLD") { fill = "rgba(250,204,21,0.95)"; ring = "rgba(250,204,21,0.35)"; }
-      if (state === "RTB") { fill = "rgba(239,68,68,0.95)"; ring = "rgba(239,68,68,0.35)"; }
-      if (state === "FORM_UP") { fill = "rgba(34,197,94,0.95)"; ring = "rgba(34,197,94,0.35)"; }
-      if (state === "NORMAL") { fill = "rgba(96,165,250,0.95)"; ring = "rgba(96,165,250,0.35)"; }
-
-      ctx.strokeStyle = isSelected ? "rgba(255,255,255,0.9)" : ring;
-      ctx.lineWidth = isSelected ? 2 : 1;
-      ctx.beginPath();
-      ctx.arc(cx, cy, isSelected ? 14 : 12, 0, Math.PI * 2);
-      ctx.stroke();
-
-      const size = 10;
-      const p1 = [cx + Math.cos(rad) * size, cy - Math.sin(rad) * size];
-      const p2 = [cx + Math.cos(rad + 2.5) * size * 0.8, cy - Math.sin(rad + 2.5) * size * 0.8];
-      const p3 = [cx + Math.cos(rad - 2.5) * size * 0.8, cy - Math.sin(rad - 2.5) * size * 0.8];
-
-      ctx.fillStyle = fill;
-      ctx.beginPath();
-      ctx.moveTo(p1[0], p1[1]);
-      ctx.lineTo(p2[0], p2[1]);
-      ctx.lineTo(p3[0], p3[1]);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace";
-      ctx.fillStyle = "rgba(229,231,235,0.85)";
-      ctx.fillText(n.node_id, cx + 16, cy + 4);
-
-      mapHitRef.current.push({ node_id: n.node_id, cx, cy, r: 18 });
+      const lat = n?.pos?.lat;
+      const lon = n?.pos?.lon;
+      if (isNum(lat) && isNum(lon)) return [lat, lon];
     }
 
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
-  }, [sorted, selectedNode]);
+    return [39.9334, 32.8597]; // Ankara
+  }, [baseLL, sorted]);
 
-  function onMapClick(e) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+  async function onMapClickSetTarget(latlng) {
+    try {
+      const lat = latlng.lat;
+      const lon = latlng.lng;
 
-    let hit = null;
-    for (const h of mapHitRef.current) {
-      const dx = mx - h.cx;
-      const dy = my - h.cy;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d <= h.r) { hit = h; break; }
+      const patch = {
+        target: {
+          lat,
+          lon,
+          alt_m: targetLL && isNum(targetLL.alt_m) ? targetLL.alt_m : 120,
+          radius_m:
+            targetLL && isNum(targetLL.radius_m) ? targetLL.radius_m : 120,
+          task: targetLL && typeof targetLL.task === "string"
+            ? targetLL.task
+            : "RECON",
+        },
+      };
+
+      const newMission = await postMissionPatch(patch);
+      setMission(newMission);
+      pushEvent(
+        `TARGET set → lat=${lat.toFixed(6)} lon=${lon.toFixed(6)}`
+      );
+    } catch (e) {
+      setErr("Mission error: " + String(e));
     }
+  }
 
-    if (hit) {
-      setSelectedNode(hit.node_id);
-      setTarget(hit.node_id);
-    } else {
-      setSelectedNode(null);
-    }
+  function selectNode(id) {
+    setSelectedNode(id);
+    setTarget(id);
+  }
+
+  function stateColor(state) {
+    const s = String(state || "UNKNOWN");
+    if (s === "HOLD" || s === "HOLDING") return "stateHold";
+    if (s === "RTB" || s === "ENROUTE_BASE") return "stateRTB";
+    if (s === "FORM_UP") return "stateForm";
+    if (s === "NORMAL") return "stateNormal";
+    return "stateUnknown";
   }
 
   return (
@@ -257,7 +279,9 @@ export default function App() {
       <header className="topbar">
         <div>
           <div className="title">FalconMesh GCS</div>
-          <div className="subtitle">Swarm Telemetry + C2 (v2 • Tactical Map)</div>
+          <div className="subtitle">
+            Swarm Telemetry + C2 (v3 • World Map + Mission)
+          </div>
         </div>
 
         <div className="right">
@@ -265,7 +289,9 @@ export default function App() {
             WS: {wsStatus}
           </div>
           <div className="meta">
-            Nodes: <b>{health?.nodes ?? sorted.length}</b> • WS telem: <b>{health?.ws_telem ?? "-"}</b> • WS uav: <b>{health?.ws_uav ?? "-"}</b>
+            Nodes: <b>{health?.nodes ?? sorted.length}</b> • WS telem:{" "}
+            <b>{health?.ws_telem ?? "-"}</b> • WS uav:{" "}
+            <b>{health?.ws_uav ?? "-"}</b>
           </div>
         </div>
       </header>
@@ -278,7 +304,6 @@ export default function App() {
 
       <main className="content">
         <div className="shell">
-
           {/* LEFT SIDEBAR */}
           <aside className="sidebar">
             <div className="card">
@@ -296,8 +321,12 @@ export default function App() {
             <div className="card">
               <div className="cardTitle">Filters</div>
               <div className="formRow">
-                <label className="label">Target</label>
-                <select className="select" value={target} onChange={(e) => setTarget(e.target.value)}>
+                <label className="label">Command Target</label>
+                <select
+                  className="select"
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                >
                   {targets.map((t) => (
                     <option key={t} value={t}>
                       {t === "all" ? "all (broadcast)" : t}
@@ -307,29 +336,107 @@ export default function App() {
               </div>
 
               <div className="hint">
-                Tip: Map’te UAV’a tıkla → target otomatik seçilir.
+                Tip: UAV marker’a tıkla → sağ panelde seçilir, komut hedefi
+                otomatik olur.
               </div>
             </div>
 
             <div className="card">
               <div className="cardTitle">Quick Commands</div>
               <div className="btnRow">
-                <button className="btn" disabled={sending} onClick={() => sendCommand("HOLD")}>HOLD</button>
-                <button className="btn" disabled={sending} onClick={() => sendCommand("FORM_UP")}>FORM_UP</button>
-                <button className="btn" disabled={sending} onClick={() => sendCommand("RTB")}>RTB</button>
-                <button className="btn primary" disabled={sending} onClick={() => sendCommand("RESUME")}>RESUME</button>
+                <button
+                  className="btn"
+                  disabled={sending}
+                  onClick={() => sendCommand("HOLD")}
+                >
+                  HOLD
+                </button>
+                <button
+                  className="btn"
+                  disabled={sending}
+                  onClick={() => sendCommand("FORM_UP")}
+                >
+                  FORM_UP
+                </button>
+                <button
+                  className="btn"
+                  disabled={sending}
+                  onClick={() => sendCommand("RTB")}
+                >
+                  RTB
+                </button>
+                <button
+                  className="btn primary"
+                  disabled={sending}
+                  onClick={() => sendCommand("RESUME")}
+                >
+                  RESUME
+                </button>
               </div>
 
               <div className="hint">
-                {lastCmd ? (
-                  <>
-                    Last: <span className="mono">{lastCmd.command}</span> →{" "}
-                    <span className="mono">{lastCmd.target}</span> (delivered:{" "}
-                    <span className="mono">{lastCmd.delivered}</span>)
-                  </>
-                ) : (
-                  <>Henüz komut yok.</>
-                )}
+                States: <span className="mono">NORMAL</span>,{" "}
+                <span className="mono">HOLDING</span>,{" "}
+                <span className="mono">ENROUTE_TARGET</span>,{" "}
+                <span className="mono">ENROUTE_BASE</span>,{" "}
+                <span className="mono">CHARGING</span>
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="cardTitle">Mission (v2 lat/lon)</div>
+
+              <div className="kv">
+                <div className="k">Mission</div>
+                <div className="v mono">{mission?.id ?? "-"}</div>
+              </div>
+
+              <div className="kv">
+                <div className="k">Updated</div>
+                <div className="v mono">{fmtTs(mission?.updated_ts)}</div>
+              </div>
+
+              <div className="sep" />
+
+              <div className="kv">
+                <div className="k">Base</div>
+                <div className="v mono">
+                  {baseLL
+                    ? `${baseLL.lat}, ${baseLL.lon} r=${
+                        baseLL.radius_m ?? "-"
+                      }m`
+                    : "-"}
+                </div>
+              </div>
+
+              <div className="kv">
+                <div className="k">Target</div>
+                <div className="v mono">
+                  {targetLL
+                    ? `${targetLL.lat}, ${targetLL.lon} r=${
+                        targetLL.radius_m ?? "-"
+                      }m ${targetLL.task ?? ""}`
+                    : "-"}
+                </div>
+              </div>
+
+              <div className="kv">
+                <div className="k">Battery</div>
+                <div className="v mono">
+                  {batteryV2
+                    ? `RTB<${batteryV2.rtb_threshold_pct}%  CHG>${batteryV2.charge_to_pct}%`
+                    : "-"}
+                </div>
+              </div>
+
+              <div className="kv">
+                <div className="k">Staging</div>
+                <div className="v mono">{stagingLL.length}</div>
+              </div>
+
+              <div className="hint">
+                Map’e tıkla → <b>Target Set</b> (POST /api/mission). Mission
+                update WS ile anlık gelir.
               </div>
             </div>
           </aside>
@@ -337,15 +444,122 @@ export default function App() {
           {/* CENTER MAP */}
           <section className="center">
             <div className="card mapCard">
-              <div className="cardTitle">Tactical Map</div>
+              <div className="cardTitle">World Map</div>
               <div className="mapHint">
-                Colors: <span className="mono">NORMAL</span>=blue, <span className="mono">FORM_UP</span>=green, <span className="mono">HOLD</span>=yellow, <span className="mono">RTB</span>=red.
+                Sol tık: <span className="mono">Target Set</span> • Marker tık:
+                popup • Base/Target circle: mission radius
               </div>
-              <div className="mapWrap">
-                <canvas ref={canvasRef} className="mapCanvas mapCanvasFull" onClick={onMapClick} />
+
+              <div className="mapWrap leafletWrap">
+                <MapContainer
+                  center={mapCenter}
+                  zoom={14}
+                  minZoom={2}
+                  maxZoom={19}
+                  scrollWheelZoom={true}
+                  worldCopyJump={true} // C: dünya tekrar eder, gri alan olmaz
+                  style={{ height: "100%", width: "100%" }}
+                >
+                  <MapAutoSize />
+
+                  {/* ✅ Street map + place names (OSM) */}
+                  <TileLayer
+                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    attribution="© OpenStreetMap contributors"
+                    maxZoom={19}
+                    keepBuffer={6}
+                    updateWhenIdle={true}
+                    updateWhenZooming={false}
+                  />
+
+                  <ClickCapture onClick={onMapClickSetTarget} />
+
+                  {/* Mission base */}
+                  {baseLL && isNum(baseLL.lat) && isNum(baseLL.lon) ? (
+                    <>
+                      <Circle
+                        center={[baseLL.lat, baseLL.lon]}
+                        radius={clamp(Number(baseLL.radius_m ?? 200), 10, 5000)}
+                      />
+                      <Marker position={[baseLL.lat, baseLL.lon]}>
+                        <Popup>
+                          <b>BASE</b>
+                          <div className="mono">
+                            {baseLL.lat}, {baseLL.lon}
+                          </div>
+                        </Popup>
+                      </Marker>
+                    </>
+                  ) : null}
+
+                  {/* Staging */}
+                  {stagingLL.map((s, idx) => {
+                    if (!isNum(s.lat) || !isNum(s.lon)) return null;
+                    return (
+                      <Circle
+                        key={`stg-${idx}`}
+                        center={[s.lat, s.lon]}
+                        radius={clamp(Number(s.radius_m ?? 80), 10, 5000)}
+                      />
+                    );
+                  })}
+
+                  {/* Target */}
+                  {targetLL && isNum(targetLL.lat) && isNum(targetLL.lon) ? (
+                    <>
+                      <Circle
+                        center={[targetLL.lat, targetLL.lon]}
+                        radius={clamp(
+                          Number(targetLL.radius_m ?? 120),
+                          10,
+                          8000
+                        )}
+                      />
+                      <Marker position={[targetLL.lat, targetLL.lon]}>
+                        <Popup>
+                          <b>TARGET</b>{" "}
+                          <span className="mono">{targetLL.task ?? ""}</span>
+                          <div className="mono">
+                            {targetLL.lat}, {targetLL.lon}
+                          </div>
+                        </Popup>
+                      </Marker>
+                    </>
+                  ) : null}
+
+                  {/* UAV markers */}
+                  {sorted.map((n) => {
+                    const lat = n?.pos?.lat;
+                    const lon = n?.pos?.lon;
+                    if (!isNum(lat) || !isNum(lon)) return null;
+                    const cls = stateColor(n.state);
+
+                    return (
+                      <Marker
+                        key={n.node_id}
+                        position={[lat, lon]}
+                        eventHandlers={{ click: () => selectNode(n.node_id) }}
+                      >
+                        <Popup>
+                          <b className={cls}>{n.node_id}</b>
+                          <div className="mono">state: {n.state ?? "-"}</div>
+                          <div className="mono">
+                            lat/lon: {lat}, {lon}
+                          </div>
+                          <div className="mono">hdg: {n.heading_deg ?? "-"}</div>
+                          <div className="mono">spd: {n.speed_mps ?? "-"}</div>
+                          <div className="mono">
+                            bat: {n.battery?.pct ?? n.battery_pct ?? "-"}
+                          </div>
+                        </Popup>
+                      </Marker>
+                    );
+                  })}
+                </MapContainer>
               </div>
+
               <div className="mapFooter">
-                Selected: <span className="mono">{selectedNode ?? "-"}</span>
+                Selected UAV: <span className="mono">{selectedNode ?? "-"}</span>
               </div>
             </div>
           </section>
@@ -367,46 +581,69 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sorted.map((n) => (
-                      <tr key={n.node_id} className={n.node_id === selectedNode ? "rowSel" : ""}>
-                        <td className="mono">{n.node_id}</td>
-                        <td className="stateCell">{n.state}</td>
-                        <td className="mono">{n.pos?.x ?? "-"}, {n.pos?.y ?? "-"}</td>
-                        <td className="mono">{n.heading_deg ?? "-"}</td>
-                        <td className="mono">{n.speed_mps ?? "-"}</td>
-                        <td className="mono">{n.battery_pct ?? "-"}</td>
-                      </tr>
-                    ))}
+                    {sorted.map((n) => {
+                      const pos = n.pos || {};
+                      const posStr =
+                        isNum(pos.lat) && isNum(pos.lon)
+                          ? `${pos.lat.toFixed(5)}, ${pos.lon.toFixed(5)}`
+                          : `${pos.x ?? "-"}, ${pos.y ?? "-"}`;
+
+                      const bat = n.battery?.pct ?? n.battery_pct ?? "-";
+                      return (
+                        <tr
+                          key={n.node_id}
+                          className={n.node_id === selectedNode ? "rowSel" : ""}
+                          onClick={() => selectNode(n.node_id)}
+                          style={{ cursor: "pointer" }}
+                        >
+                          <td className="mono">{n.node_id}</td>
+                          <td className="stateCell">{n.state}</td>
+                          <td className="mono">{posStr}</td>
+                          <td className="mono">{n.heading_deg ?? "-"}</td>
+                          <td className="mono">{n.speed_mps ?? "-"}</td>
+                          <td className="mono">{bat}</td>
+                        </tr>
+                      );
+                    })}
                     {sorted.length === 0 ? (
-                      <tr><td colSpan="6" style={{ opacity: 0.7 }}>No nodes yet…</td></tr>
+                      <tr>
+                        <td colSpan="6" style={{ opacity: 0.7 }}>
+                          No nodes yet…
+                        </td>
+                      </tr>
                     ) : null}
                   </tbody>
                 </table>
+              </div>
+
+              <div className="hint">
+                Not: UAV marker’larının haritada görünmesi için telemetry{" "}
+                <span className="mono">pos.lat/lon</span> vermeli.
               </div>
             </div>
 
             <div className="card">
               <div className="cardTitle">Event Log</div>
               <div className="logBox">
-                {lastCmd ? (
-                  <div className="logLine">
-                    <span className="mono">{fmtTs(lastCmd.ts)}</span>{" "}
-                    CMD <span className="mono">{lastCmd.command}</span>{" "}
-                    → <span className="mono">{lastCmd.target}</span>{" "}
-                    delivered:<span className="mono">{lastCmd.delivered}</span>
-                  </div>
+                {events.length ? (
+                  events.map((e, i) => (
+                    <div key={i} className="logLine">
+                      <span className="mono">{e.ts}</span> {e.line}
+                    </div>
+                  ))
                 ) : (
                   <div style={{ opacity: 0.7 }}>No events yet.</div>
                 )}
               </div>
             </div>
           </aside>
-
         </div>
       </main>
 
       <footer className="footer">
-        FalconMesh • WS: <span className="mono">/ws/telemetry</span> • Commands: <span className="mono">POST /api/command</span>
+        FalconMesh • WS: <span className="mono">/ws/telemetry</span> • Commands:{" "}
+        <span className="mono">POST /api/command</span> • Mission:{" "}
+        <span className="mono">POST /api/mission</span>
       </footer>
     </div>
   );
